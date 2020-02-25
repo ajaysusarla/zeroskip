@@ -36,12 +36,16 @@ AM_CFLAGS += -ggdb -O2
 endif
 
 
-bin_PROGRAMS = \
+bin_PROGRAMS =  \
 	zsbench \
+	zsmany  \
 	crc32bench
 
 zsbench_SOURCES = \
 	zsbench.c
+
+zsmany_SOURCES = \
+	zsmany.c
 
 crc32bench_SOURCES = \
 	crc32bench.c
