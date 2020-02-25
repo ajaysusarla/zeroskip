@@ -79,39 +79,10 @@ static char *create_tmp_dir_name(void)
                 return NULL;
 }
 
-static char *generate_random_string(char *str, size_t length)
-{
-        static const char charset[] =
-                "abcdefghijklmnopqrstuvwxyz"
-                "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                "0123456789"
-                "!@#$%^&*()-=_+|{}[];<>,./?:";
-
-        if (length) {
-                --length;
-
-                for (size_t n = 0; n < length; n++) {
-                        int pos = rand() % (int) (sizeof charset - 1);
-                        str[n] = charset[pos];
-                }
-
-                str[length] = '\0';
-        }
-
-        return str;
-}
-
-static char *random_string(size_t length)
-{
-     char *s = xmalloc(length + 1);
-
-     generate_random_string(s, length);
-
-     return s;
-}
 
 static void cleanup_db_dir(void)
 {
+        printf("Cleaning up DB: %s\n", DBNAME);
         recursive_rm(DBNAME);
 }
 
@@ -121,6 +92,69 @@ static uint64_t get_time_now(void)
         gettimeofday(&tv, NULL);
 
         return tv.tv_sec * 1000000 + tv.tv_usec;
+}
+
+static const char *nth_compound(unsigned int n,
+                                const char * const * words /*[37]*/,
+                                const char *sep,
+                                cstring *res)
+{
+        size_t len = 0;
+        cstring_init(res, 0);
+
+        if ((n / 1000) % 10) {
+                cstring_addstr(res, words[28 + (n / 1000) % 10]);
+        }
+
+        if ((n / 100) % 10) {
+                if (res->len && sep)
+                        cstring_addstr(res, sep);
+                cstring_addstr(res, words[19 + (n / 100) % 10]);
+        }
+
+        if ((n / 10) % 10) {
+                if (res->len && sep)
+                        cstring_addstr(res, sep);
+                cstring_addstr(res, words[10 + (n / 10) % 10]);
+        }
+
+        if (res->len && sep)
+                cstring_addstr(res, sep);
+        cstring_addstr(res, words[n % 10]);
+
+        return cstring_detach(res, &len);
+}
+
+static const char *nth_key(unsigned int n)
+{
+        static const char * const words[37] = {
+                "dray", "bite", "cue", "ado", "felt",
+                "firm", "sal", "ahab", "cab", "lord",
+                "blob", "be", "coil", "hay",
+                "bled", "got", "leta", "sept", "deft",
+                "ibm", "kama", "bean", "ado",
+                "cord", "firm", "ben", "fore", "huck",
+                "haas", "jack", "aden", "nerf",
+                "gash", "stu", "nona", "gel", "ale"
+        };
+        static cstring buf;
+        return nth_compound(n, words, ".", &buf);
+}
+
+static const char *nth_data(unsigned int n)
+{
+        static const char * const words[37] = {
+                "abettor", "afresh", "aisling", "arthur", "ascots",
+                "belled", "berserk", "border", "bourbon", "brawny",
+                "carpels", "cavils", "coating", "cologne",
+                "concern", "consul", "crater", "crocks", "deirdre",
+                "dewier", "disdain", "dowdier", "duncan",
+                "eighth", "enigma", "evelyn", "fennel", "flowery",
+                "flukier", "forums", "gametes", "gamins",
+                "gavels", "gibbers", "gulags", "gunther", "gunwale"
+        };
+        static cstring buf;
+        return nth_compound(n, words, " ", &buf);
 }
 
 static void print_warnings(void)
@@ -193,74 +227,69 @@ static void print_header(void)
         fprintf(stdout, "------------------------------------------------\n");
 }
 
-/* static size_t do_write(int txnmode, int insmode) */
-/* { */
-/*         int i; */
-/*         int ret; */
-/*         struct zsdb *db = NULL; */
-/*         size_t bytes = 0; */
-/*         struct zsdb_txn *txn = NULL; */
-
-/*         /\* Open Zeroskip DB *\/ */
-/*         ret = zsdb_init(&db, NULL, NULL); */
-/*         assert(ret == ZS_OK); */
-/*         ret = zsdb_open(db, DBNAME, new_db ? MODE_CREATE : MODE_RDWR); */
-/*         assert(ret == ZS_OK); */
-
-/*         zsdb_write_lock_acquire(db, 0); */
-
-/*         for (i = 0; i < NUMRECS; i++) { */
-/*                 char key[100]; */
-/*                 size_t keylen, vallen; */
-/*                 char *val; */
-/*                 int k; */
-
-/*                 k = (insmode == SEQUENTIAL) ? i : ((time(NULL) *  i) % NUMRECS); */
-
-/*                 snprintf(key, sizeof(key), "%016d", k); */
-/*                 keylen = strlen(key); */
-/*                 vallen = VALLEN ? VALLEN : keylen * 2; */
-/*                 val = random_string(vallen); */
-
-/*                 if (txnmode == BATCHED) { */
-/*                         ret = zsdb_transaction_begin(db, &txn); */
-/*                         assert(ret == ZS_OK); */
-/*                 } */
-
-/*                 ret = zsdb_add(db, (unsigned char *)key, keylen, */
-/*                                (unsigned char *)val, vallen, &txn); */
-
-/*                 assert(ret == ZS_OK); */
-/*                 bytes += (keylen + vallen); */
-
-/*                 if (txnmode == BATCHED) { */
-/*                         ret = zsdb_commit(db, &txn); */
-/*                         assert(ret == ZS_OK); */
-/*                 } */
-/*         } */
-
-/*         zsdb_write_lock_release(db); */
-
-/*         if (txnmode == NOTBATCHED) */
-/*                 zsdb_commit(db, NULL); */
-
-/*         /\* Close Zeroskip DB *\/ */
-/*         ret = zsdb_close(db); */
-/*         assert(ret == ZS_OK); */
-/*         zsdb_final(&db); */
-
-
-/*         return bytes; */
-/* } */
-
 static int run_many(void)
 {
         uint64_t start, finish;
-        size_t bytes;
+        int i;
+        int ret;
+        struct zsdb *db = NULL;
+        size_t bytes = 0;
+        struct zsdb_txn *txn = NULL;
+        unsigned int MAXN = 4095;
+        unsigned int n;
 
         print_header();
 
-        return 0;
+        /* Open Zeroskip DB */
+        ret = zsdb_init(&db, NULL, NULL);
+        assert(ret == ZS_OK);
+        ret = zsdb_open(db, DBNAME, new_db ? MODE_CREATE : MODE_RDWR);
+        assert(ret == ZS_OK);
+
+        zsdb_write_lock_acquire(db, 0);
+
+        /* Store some records */
+        for (n = 0; n <= MAXN; n++) {
+                const char *key = nth_key(n);
+                const char *data = nth_data(n);
+                size_t keylen, datalen;
+                keylen = strlen(key);
+                datalen = strlen(data);
+                ret = zsdb_add(db, (unsigned char *)key, keylen,
+                               (unsigned char *)data, datalen, &txn);
+                assert(ret == ZS_OK);
+                bytes += keylen + datalen;
+        }
+
+        zsdb_write_lock_release(db);
+
+        /* Commit succeeds */
+        zsdb_commit(db, &txn);
+        assert(ret == ZS_OK);
+
+        /* check the records all made it */
+        for (n = 0; n <= MAXN; n++) {
+                const char *key = nth_key(n);
+                const char *expdata = nth_data(n);
+                const char *data;
+                size_t keylen, expdatalen, datalen;
+                keylen = strlen(key);
+                expdatalen = strlen(expdata);
+
+                ret = zsdb_fetch(db, (const unsigned char *)key,
+                                 keylen,
+                                 &data, &datalen, &txn);
+                assert(ret == ZS_OK);
+                assert(expdatalen == datalen);
+                assert(!memcmp(data, expdata, datalen));
+        }
+
+        /* Close Zeroskip DB */
+        ret = zsdb_close(db);
+        assert(ret == ZS_OK);
+        zsdb_final(&db);
+
+        return bytes;
 }
 
 

@@ -329,6 +329,8 @@ static int run_benchmarks(void)
 
         print_header();
 
+        str_array_init(&benchmarks);
+
         str_array_from_strsplit(&benchmarks, BENCHMARKS, ',');
 
         for (i = 0; i < benchmarks.count; i++) {
