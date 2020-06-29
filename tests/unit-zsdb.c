@@ -93,6 +93,17 @@ static struct kvrecs kvforeachchanges[] = {
         { (const unsigned char *)K6, 6, (const unsigned char *)"annoying push security plenty ending", 36 },
 };
 
+static struct kvrecs kvrecs_binary_keys[] = {
+        { (const unsigned char *)"master\0cleanse", 4, (const unsigned char *)"ethical", 3 },
+        { (const unsigned char *)"cardigan\tdreamcatcher", 5, (const unsigned char *)"shoreditch", 5 },
+        { (const unsigned char *)"pitchfork\rcarles", 5, (const unsigned char *)"tumble", 5 },
+        { (const unsigned char *)"seitan\nraw\ndenim", 5, (const unsigned char *)"fap", 5 },
+        { (const unsigned char *){ 0x01, 0x02, 0x04, 0x08,
+                                 0x10, 0x20, 0x40, 0x80,
+                                 0x00/*unused*/}, 5, (const unsigned char *)"farm-to-table", 5 },
+        { (const unsigned char *)" BLANK\x07\xa0", 5, (const unsigned char *)"magic blank in key!", 5 },
+};
+
 struct zsdb *db = NULL;
 static char *basedir = NULL;
 
@@ -802,6 +813,16 @@ START_TEST(test_fetchnext_simple)
 }
 END_TEST
 
+START_TEST(test_binary_keys)
+{
+}
+END_TEST
+
+START_TEST(test_binary_values)
+{
+}
+END_TEST
+
 Suite *zsdb_suite(void)
 {
         Suite *s;
@@ -809,6 +830,7 @@ Suite *zsdb_suite(void)
         TCase *tc_many;
         TCase *tc_foreach;
         TCase *tc_fetch;
+        TCase *tc_binary;
 
         s = suite_create("zeroskip");
 
@@ -848,6 +870,14 @@ Suite *zsdb_suite(void)
 
         tcase_add_test(tc_many, test_many_records);
         suite_add_tcase(s, tc_many);
+
+        /* binary keys and values */
+        tc_binary = tcase_create("binary");
+        tcase_add_checked_fixture(tc_binary, setup, teardown);
+
+        tcase_add_test(tc_binary, test_binary_keys);
+        tcase_add_test(tc_binary, test_binary_values);
+        suite_add_tcase(s, tc_binary);
 
         return s;
 }
