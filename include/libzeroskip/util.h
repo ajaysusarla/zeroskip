@@ -66,7 +66,15 @@ static inline size_t off_to_size_t(off_t len)
 /*
  * Endianness utils
  */
-static inline uint64_t bswap64(uint64_t val)
+static inline uint32_t default_bswap32(uint32_t val)
+{
+        return (((val & 0xff000000) >> 24) |
+                ((val & 0x00ff0000) >>  8) |
+                ((val & 0x0000ff00) <<  8) |
+                ((val & 0x000000ff) << 24));
+}
+
+static inline uint64_t default_bswap64(uint64_t val)
 {
         return (((val & (uint64_t)0x00000000000000ffULL) << 56) |
                 ((val & (uint64_t)0x000000000000ff00ULL) << 40) |
@@ -77,6 +85,59 @@ static inline uint64_t bswap64(uint64_t val)
                 ((val & (uint64_t)0x00ff000000000000ULL) >> 40) |
                 ((val & (uint64_t)0xff00000000000000ULL) >> 56));
 }
+
+#undef bswap32
+#undef bswap64
+
+#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))
+
+#define bswap32 zs_bswap32
+static inline uint32_t zs_bswap32(uint32_t val)
+{
+        uint32_t result;
+        if (__builtin_constant_p(val))
+                result = default_bswap32(val);
+        else
+                __asm__("bswap %0" : "=r" (result) : "0" (val));
+
+        return result;
+}
+
+#define bswap64 zs_bswap64
+#if defined(__x86_64__)
+static inline uint64_t zs_bswap64(uint64_t val)
+{
+        uint64_t result;
+        if (__builtin_constant_p(val))
+                result = default_bswap64(val);
+        else
+                __asm__("bswap %q0" : "=r" (result) : "0" (val));
+
+        return result;
+}
+#else
+static inline uint64_t zs_bswap64(uint64_t val)
+{
+        union { uint64_t i64; uint32_t i32[2]; } tmp, result;
+        if (__builtin_constant_p(val))
+                result.i64 = default_bswap64(val);
+        else {
+                tmp.i64 = val;
+                result.i32[0] = zs_bswap32(tmp.i32[1]);
+                result.i32[1] = zs_bswap32(tmp.i32[0]);
+        }
+        return result.i64;
+}
+#endif  /* __x86_64__ */
+
+#endif  /* defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__)) */
+
+#if defined(bswap32)
+#undef ntohl
+#undef htonl
+#define ntohl(x) bswap32(x)
+#define htonl(x) bswap32(x)
+#endif  /* bswap32 */
 
 #define hton8(x)   (x)
 #define ntoh8(x)   (x)
