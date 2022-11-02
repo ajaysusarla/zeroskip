@@ -183,8 +183,6 @@ int xunlink(const char *path)
         return ret;
 }
 
-#define MAX_BUF_PATH (2 * PATH_MAX)
-
 #if defined(LINUX) || defined(DARWIN) || defined(BSD)
 /* get_filenames_with_matching_prefix()
  * get files(only) in a given path, matching a prefix.

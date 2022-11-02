@@ -33,6 +33,9 @@
 
 CPP_GUARD_START
 
+/* MAX_BUF_PATH : buffer size used for printing path */
+#define MAX_BUF_PATH ((2 * PATH_MAX) + 1)
+
 typedef enum {
         FALSE = 0,
         TRUE

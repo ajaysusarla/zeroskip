@@ -234,8 +234,6 @@ enum {
         DB_REL_PATH = 1,
 };
 
-#define MAX_BUF_PATH (2 * PATH_MAX)
-
 #if defined(LINUX) || defined(DARWIN) || defined(BSD)
 static int process_files_in_dbdir(char *const path[],
                                   int full_path,
