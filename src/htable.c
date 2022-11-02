@@ -33,7 +33,7 @@ static int default_cmp_fn(const void *data _unused_,
 static void alloc_htable(struct htable *ht, size_t size)
 {
         ht->size = size;
-        ht->table = xcalloc(size, sizeof(struct htable *));
+        ht->table = xcalloc(size, sizeof(*(ht->table)));
 
         ht->grow_mark = size * HTABLE_RESIZE_THRESHOLD / 100;
         if (size <= HTABLE_INIT_SIZE)
