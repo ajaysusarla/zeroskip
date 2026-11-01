@@ -244,20 +244,15 @@ static int zsdb_iter_data_next(struct zsdb_iter *iter,
                 if (memtree_next(iterdata->data.iter)) {
                         key = iterdata->data.iter->record->key;
                         keylen = iterdata->data.iter->record->keylen;
-                        iterdata->deleted = iterdata->data.iter->record->deleted;
                 }
                 break;
         case ZSDB_BE_PACKED:
         {
                 struct zsdb_file *f = iterdata->data.f;
-                enum record_t rectype = REC_TYPE_UNUSED;
                 f->indexpos++;
                 if (f->indexpos < f->index->count)
                         zs_packed_file_get_key_from_offset(f, &key,
-                                                           &keylen, &rectype);
-                if (rectype == REC_TYPE_DELETED || rectype == REC_TYPE_LONG_DELETED)
-                        iterdata->deleted = 1;
-
+                                                           &keylen, NULL);
                 break;
         }
         default:
@@ -275,12 +270,43 @@ static int zsdb_iter_data_next(struct zsdb_iter *iter,
         return ret;
 }
 
+/* Set `deleted` from the record the iterator data currently points at.
+ */
+static void zsdb_iter_data_update_deleted(struct zsdb_iter_data *iterd)
+{
+        switch (iterd->type) {
+        case ZSDB_BE_ACTIVE:
+        case ZSDB_BE_FINALISED:
+                iterd->deleted = iterd->data.iter->record ?
+                        iterd->data.iter->record->deleted : 0;
+                break;
+        case ZSDB_BE_PACKED:
+        {
+                struct zsdb_file *f = iterd->data.f;
+                struct zs_key k;
+
+                iterd->deleted = 0;
+                if (f->indexpos < f->index->count &&
+                    zs_record_read_key_from_file_offset(f,
+                                                        f->index->data[f->indexpos],
+                                                        &k) == ZS_OK)
+                        iterd->deleted = !!(k.base.type & REC_TYPE_DELETED);
+                break;
+        }
+        default:
+                abort();        /* should never reach here */
+        }
+}
+
 /* Process struct zsdb_iter_data */
 static void zsdb_iter_data_process(struct zsdb_iter *iter,
                                    unsigned char *key, uint64_t keylen,
                                    struct zsdb_iter_data *new_iterd)
 {
         struct iter_htable_entry *e;
+
+        /* new_iterd has just moved to `key` */
+        zsdb_iter_data_update_deleted(new_iterd);
 
         /* check if the key exists in the hash table */
         e = iter_htable_get(&iter->ht, key, keylen);
@@ -386,28 +412,26 @@ int zs_iterator_begin(struct zsdb_iter **iter)
                 struct zsdb_file *f;
                 unsigned char *key;
                 uint64_t keylen;
-                enum record_t rectype;
 
                 f = list_entry(pos, struct zsdb_file, list);
                 piterd = zsdb_iter_data_alloc(ZSDB_BE_PACKED, f->priority,
                                               f, NULL);
-                prio = f->priority;
 
-                zs_packed_file_get_key_from_offset(f, &key, &keylen, &rectype);
-                if (rectype == REC_TYPE_DELETED || rectype == REC_TYPE_LONG_DELETED)
-                        piterd->deleted = 1;
+                zs_packed_file_get_key_from_offset(f, &key, &keylen, NULL);
 
                 zsdb_iter_datav_add_iter(*iter, piterd);
 
                 zsdb_iter_data_process(*iter, key, keylen, piterd);
         }
 
+        /* Finalised and active records are newer than any packed file */
+        prio = priv->dbfiles.pfcount;
+
         /* Add finalised files to the iterator*/
         if (priv->dbfiles.ffcount) {
                 prio++;
                 fiterd = zsdb_iter_data_alloc(ZSDB_BE_FINALISED, prio,
                                               priv->fmemtree, NULL);
-                fiterd->deleted = fiterd->data.iter->record->deleted;
                 zsdb_iter_datav_add_iter(*iter, fiterd);
                 zsdb_iter_data_process(*iter, fiterd->data.iter->record->key,
                                        fiterd->data.iter->record->keylen,
@@ -419,7 +443,6 @@ int zs_iterator_begin(struct zsdb_iter **iter)
                 prio++;
                 aiterd = zsdb_iter_data_alloc(ZSDB_BE_ACTIVE, prio,
                                               priv->memtree, NULL);
-                aiterd->deleted = aiterd->data.iter->record->deleted;
                 zsdb_iter_datav_add_iter(*iter, aiterd);
                 zsdb_iter_data_process(*iter, aiterd->data.iter->record->key,
                                        aiterd->data.iter->record->keylen,
@@ -467,7 +490,6 @@ int zs_iterator_begin_at_key(struct zsdb_iter **iter,
                 uint64_t nextkeylen = 0;
 
                 f = list_entry(pos, struct zsdb_file, list);
-                prio = f->priority;
 
                 zslog(LOGDEBUG, "Looking in packed file %s\n",
                       f->fname.buf);
@@ -493,6 +515,9 @@ int zs_iterator_begin_at_key(struct zsdb_iter **iter,
                                                    NULL);
                 zsdb_iter_data_process(*iter, nextkey, nextkeylen, piterd);
         }
+
+        /* Finalised and active records are newer than any packed file */
+        prio = priv->dbfiles.pfcount;
 
         /* Look for the key in the finalised records and add the iterator */
         prio++;

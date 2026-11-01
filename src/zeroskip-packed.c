@@ -676,8 +676,6 @@ int zs_packed_file_new_from_packed_files(const char *path,
 
         do {
                 data = zs_iterator_get(*iter);
-                if (data->deleted)
-                        continue;
 
                 switch(data->type) {
                 case ZSDB_BE_PACKED:

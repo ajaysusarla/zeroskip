@@ -515,9 +515,10 @@ static int zsdb_reload(struct zsdb_priv *priv)
         pqueue_free(&packedpq);
 
 
-        /* Set priority of packed files */
+        /* Set priority of packed files(newest first), the newest file must have
+         * the highest priority.*
         priority = 0;
-        list_for_each_forward(pos, &priv->dbfiles.pflist) {
+        list_for_each_reverse(pos, &priv->dbfiles.pflist) {
                 struct zsdb_file *f;
                 f = list_entry(pos, struct zsdb_file, list);
                 f->priority = ++priority;
@@ -778,7 +779,7 @@ int zsdb_open(struct zsdb *db, const char *dbdir, int mode)
 
                 /* Set priority of packed files */
                 priority = 0;
-                list_for_each_forward(pos, &priv->dbfiles.pflist) {
+                list_for_each_reverse(pos, &priv->dbfiles.pflist) {
                         struct zsdb_file *f;
                         f = list_entry(pos, struct zsdb_file, list);
                         f->priority = ++priority;
@@ -1224,14 +1225,21 @@ int zsdb_fetchnext(struct zsdb *db,
 
         data = zs_iterator_get(tempiter);
 
-        if (keyfound) {
-                /* If we found the key, we go to the next key in the iterator */
+        /* Move past `key` itself, and past any deleted keys */
+        while (data && (keyfound || data->deleted)) {
+                keyfound = 0;
                 if (!zs_iterator_next(tempiter, data)) {
-                        ret = ZS_NOTFOUND;
-                        goto done;
+                        data = NULL;
+                        break;
                 }
 
                 data = zs_iterator_get(tempiter);
+        }
+
+        if (!data) {
+                ret = ZS_NOTFOUND;
+                zs_iterator_end(&tempiter);
+                goto done;
         }
 
         /* Return data */
@@ -1884,6 +1892,12 @@ int zsdb_forone(struct zsdb *db, const unsigned char *key, size_t keylen,
         } else {
                 struct zsdb_iter_data *data;
                 data = zs_iterator_get(tempiter);
+
+                /* The newest record for the key is a tombstone */
+                if (!data || data->deleted) {
+                        ret = ZS_NOTFOUND;
+                        goto fail;
+                }
 
                 switch(data->type) {
                 case ZSDB_BE_ACTIVE:

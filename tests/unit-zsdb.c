@@ -1047,6 +1047,154 @@ START_TEST(test_delete_long_key)
 }
 END_TEST
 
+/* Iteration helpers */
+static char iter_keys[256];
+
+static int collect_key_cb(void *data _unused_,
+                          const unsigned char *key, size_t keylen,
+                          const unsigned char *val _unused_,
+                          size_t vallen _unused_)
+{
+        size_t len = strlen(iter_keys);
+
+        ck_assert_uint_lt(len + keylen + 1, sizeof(iter_keys));
+        memcpy(iter_keys + len, key, keylen);
+        iter_keys[len + keylen] = ',';
+        iter_keys[len + keylen + 1] = '\0';
+
+        return 0;
+}
+
+static void tier_assert_keys(const char *prefix, const char *expected)
+{
+        struct zsdb_txn *txn = NULL;
+        int ret;
+
+        iter_keys[0] = '\0';
+        ret = zsdb_foreach(db, (const unsigned char *)prefix,
+                           prefix ? strlen(prefix) : 0,
+                           NULL, collect_key_cb, NULL, &txn);
+        ck_assert_int_eq(ret, ZS_OK);
+        ck_assert_str_eq(iter_keys, expected);
+}
+
+/* Iteration must skip keys whose newest record is a tombstone, both
+ * from the start of the DB and from a prefix.
+ */
+START_TEST(test_foreach_skips_deleted)
+{
+        tier_add("a", "1");
+        tier_add("b", "2");
+        tier_add("c", "3");
+        tier_finalise();
+        tier_reopen();
+
+        tier_remove("b");
+        tier_assert_keys(NULL, "a,c,");
+        tier_assert_keys("b", "");
+        tier_assert_keys("c", "c,");
+
+        tier_reopen();
+        tier_assert_keys(NULL, "a,c,");
+        tier_assert_keys("b", "");
+
+        /* fetchnext skips over the deleted key */
+        {
+                struct zsdb_txn *txn = NULL;
+                const unsigned char *found = NULL, *value = NULL;
+                size_t foundlen = 0, vallen = 0;
+                int ret;
+
+                ret = zsdb_fetchnext(db, (const unsigned char *)"a", 1,
+                                     &found, &foundlen, &value, &vallen,
+                                     &txn);
+                ck_assert_int_eq(ret, ZS_OK);
+                ck_assert_uint_eq(foundlen, 1);
+                ck_assert_mem_eq(found, "c", 1);
+
+                /* forone doesn't find it */
+                iter_keys[0] = '\0';
+                ret = zsdb_forone(db, (const unsigned char *)"b", 1, NULL,
+                                  collect_key_cb, NULL, &txn);
+                ck_assert_int_eq(ret, ZS_NOTFOUND);
+                ck_assert_str_eq(iter_keys, "");
+        }
+}
+END_TEST
+
+/* A tombstone in a packed file used to mark every following key from
+ * that file as deleted, so they vanished from iteration and were
+ * dropped when packed files were merged.
+ */
+START_TEST(test_packed_keys_after_tombstone)
+{
+        /* P1 (0-1): a, b, c, x */
+        tier_add("a", "1");
+        tier_add("b", "2");
+        tier_add("c", "3");
+        tier_finalise();
+        tier_add("x", "4");
+        tier_finalise();
+        tier_repack();
+
+        /* P2 (2-3): tombstone for b, then y, z */
+        tier_remove("b");
+        tier_add("y", "5");
+        tier_finalise();
+        tier_add("z", "6");
+        tier_finalise();
+        tier_repack();
+        tier_reopen();
+
+        tier_assert_keys(NULL, "a,c,x,y,z,");
+
+        /* Merge P1 and P2 */
+        tier_repack();
+        tier_reopen();
+
+        tier_assert_keys(NULL, "a,c,x,y,z,");
+        tier_assert_missing("b");
+        tier_assert_value("y", "5");
+        tier_assert_value("z", "6");
+}
+END_TEST
+
+START_TEST(test_packed_merge_keeps_tombstones)
+{
+        /* P1 (0-1): a, b */
+        tier_add("a", "1");
+        tier_finalise();
+        tier_add("b", "2");
+        tier_finalise();
+        tier_repack();
+
+        /* P2 (2-3): tombstone for b, c */
+        tier_remove("b");
+        tier_finalise();
+        tier_add("c", "3");
+        tier_finalise();
+        tier_repack();
+
+        /* P3 (4-5): d, e */
+        tier_add("d", "4");
+        tier_finalise();
+        tier_add("e", "5");
+        tier_finalise();
+        tier_repack();
+        tier_reopen();
+
+        tier_assert_missing("b");
+        tier_assert_keys(NULL, "a,c,d,e,");
+
+        /* Merge P2 and P3; P1 still has b's value */
+        tier_repack();
+        tier_reopen();
+
+        tier_assert_missing("b");
+        tier_assert_keys(NULL, "a,c,d,e,");
+}
+END_TEST
+
 Suite *zsdb_suite(void)
 {
         Suite *s;
@@ -1076,6 +1224,9 @@ Suite *zsdb_suite(void)
         tcase_add_test(tc_tiers, test_delete_shadows_finalised);
         tcase_add_test(tc_tiers, test_delete_shadows_packed);
         tcase_add_test(tc_tiers, test_delete_long_key);
+        tcase_add_test(tc_tiers, test_foreach_skips_deleted);
+        tcase_add_test(tc_tiers, test_packed_keys_after_tombstone);
+        tcase_add_test(tc_tiers, test_packed_merge_keeps_tombstones);
         suite_add_tcase(s, tc_tiers);
 
         /* foreach */
