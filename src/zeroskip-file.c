@@ -165,6 +165,7 @@ static int zs_prepare_delete_key_buf(const unsigned char *key, uint64_t keylen,
         } else {
                 type = REC_TYPE_LONG_DELETED;
                 val = ((uint64_t)type << 56);
+                write_be64(kbuf + pos, val);
                 pos += sizeof(uint64_t);
                 write_be64(kbuf + pos, keylen);     /* Extended length */
                 pos += sizeof(uint64_t);

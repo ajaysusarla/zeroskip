@@ -492,7 +492,7 @@ int zs_packed_file_get_key_from_offset(struct zsdb_file *f,
             k.base.type == REC_TYPE_DELETED)
                 *len = k.base.slen;
         else if (k.base.type == REC_TYPE_LONG_KEY ||
-                 k.base.type == REC_TYPE_DELETED)
+                 k.base.type == REC_TYPE_LONG_DELETED)
                 *len = k.base.llen;
 
         *key = k.data;
@@ -537,14 +537,14 @@ int zs_pq_cmp_key_frm_offset(const void *d1, const void *d2,
             key1.base.type == REC_TYPE_DELETED)
                 len1 = key1.base.slen;
         else if (key1.base.type == REC_TYPE_LONG_KEY ||
-                 key1.base.type == REC_TYPE_DELETED)
+                 key1.base.type == REC_TYPE_LONG_DELETED)
                 len1 = key1.base.llen;
 
         if (key2.base.type == REC_TYPE_KEY ||
             key2.base.type == REC_TYPE_DELETED)
                 len2 = key2.base.slen;
         else if (key2.base.type == REC_TYPE_LONG_KEY ||
-                 key2.base.type == REC_TYPE_DELETED)
+                 key2.base.type == REC_TYPE_LONG_DELETED)
                 len2 = key2.base.llen;
 
         if (cmpfn)

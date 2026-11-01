@@ -116,7 +116,7 @@ enum record_t {
         REC_TYPE_LONG_VALUE          = REC_TYPE_VALUE | REC_TYPE_LONG,
         REC_TYPE_LONG_COMMIT         = REC_TYPE_COMMIT | REC_TYPE_LONG,
         REC_TYPE_LONG_FINAL          = REC_TYPE_FINAL | REC_TYPE_LONG,
-        REC_TYPE_LONG_DELETED        = REC_TYPE_LONG | REC_TYPE_LONG,
+        REC_TYPE_LONG_DELETED        = REC_TYPE_DELETED | REC_TYPE_LONG,
 };
 
 struct zs_key_base {

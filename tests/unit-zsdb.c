@@ -987,6 +987,66 @@ START_TEST(test_delete_shadows_packed)
 }
 END_TEST
 
+#define LONG_KEY_LEN 70000
+
+static unsigned char *make_long_key(char fill)
+{
+        unsigned char *key = xmalloc(LONG_KEY_LEN);
+        memset(key, fill, LONG_KEY_LEN);
+        return key;
+}
+
+START_TEST(test_delete_long_key)
+{
+        struct zsdb_txn *txn = NULL;
+        const unsigned char *value = NULL;
+        size_t vallen = 0;
+        unsigned char *lkey = make_long_key('L');
+        unsigned char *lkey2 = make_long_key('M');
+        int ret;
+
+        ck_assert_int_eq(zsdb_write_lock_acquire(db, 0), ZS_OK);
+        ret = zsdb_add(db, lkey, LONG_KEY_LEN,
+                       (const unsigned char *)"long", 4, &txn);
+        ck_assert_int_eq(ret, ZS_OK);
+        ret = zsdb_add(db, lkey2, LONG_KEY_LEN,
+                       (const unsigned char *)"other", 5, &txn);
+        ck_assert_int_eq(ret, ZS_OK);
+        ck_assert_int_eq(zsdb_commit(db, &txn), ZS_OK);
+
+        ret = zsdb_remove(db, lkey, LONG_KEY_LEN, &txn);
+        ck_assert_int_eq(ret, ZS_OK);
+        ck_assert_int_eq(zsdb_commit(db, &txn), ZS_OK);
+        ck_assert_int_eq(zsdb_write_lock_release(db), ZS_OK);
+
+        /* Records after the tombstone must still load */
+        tier_add("after", "tombstone");
+
+        tier_reopen();
+
+        ret = zsdb_fetch(db, lkey, LONG_KEY_LEN, &value, &vallen, &txn);
+        ck_assert_int_eq(ret, ZS_NOTFOUND);
+
+        ret = zsdb_fetch(db, lkey2, LONG_KEY_LEN, &value, &vallen, &txn);
+        ck_assert_int_eq(ret, ZS_OK);
+        ck_assert_uint_eq(vallen, 5);
+        ck_assert_mem_eq(value, "other", 5);
+
+        tier_assert_value("after", "tombstone");
+
+        /* And from a finalised file */
+        tier_finalise();
+        tier_reopen();
+
+        ret = zsdb_fetch(db, lkey, LONG_KEY_LEN, &value, &vallen, &txn);
+        ck_assert_int_eq(ret, ZS_NOTFOUND);
+        tier_assert_value("after", "tombstone");
+
+        free(lkey);
+        free(lkey2);
+}
+END_TEST
+
 Suite *zsdb_suite(void)
 {
         Suite *s;
@@ -1015,6 +1075,7 @@ Suite *zsdb_suite(void)
         tcase_add_test(tc_tiers, test_repack_finalised_files_keeps_data);
         tcase_add_test(tc_tiers, test_delete_shadows_finalised);
         tcase_add_test(tc_tiers, test_delete_shadows_packed);
+        tcase_add_test(tc_tiers, test_delete_long_key);
         suite_add_tcase(s, tc_tiers);
 
         /* foreach */
