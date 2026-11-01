@@ -1074,25 +1074,33 @@ int zsdb_fetch(struct zsdb *db,
 
         /* Look for the key in the active in-memory memtree */
         zslog(LOGDEBUG, "Looking in active records\n");
-        if (memtree_find(priv->memtree, key, keylen, iter)) {
+        /* The newest record for a key wins, so a tombstone(deletion record)
+         * found in a newer tier hides any value in the older tiers.
+         */
+        if (memtree_find(priv->memtree, key, keylen, iter) && iter->record) {
                 /* We found the key in active records */
-                if (iter->record && !iter->record->deleted) {
-                        *vallen = iter->record->vallen;
-                        *value = iter->record->val;
-                        ret = ZS_OK;
+                if (iter->record->deleted) {
+                        ret = ZS_NOTFOUND;
                         goto done;
                 }
+
+                *vallen = iter->record->vallen;
+                *value = iter->record->val;
+                ret = ZS_OK;
+                goto done;
         }
 
         /* Look for the key in the finalised records */
         zslog(LOGDEBUG, "Looking in finalised file(s)\n");
-        if (memtree_find(priv->fmemtree, key, keylen, iter)) {
+        if (memtree_find(priv->fmemtree, key, keylen, iter) && iter->record) {
                 /* We found the key in finalised records */
-                if (iter->record) {
-                        *vallen = iter->record->vallen;
-                        *value = iter->record->val;
+                if (iter->record->deleted) {
+                        ret = ZS_NOTFOUND;
+                        goto done;
                 }
 
+                *vallen = iter->record->vallen;
+                *value = iter->record->val;
                 ret = ZS_OK;
                 goto done;
         }
@@ -1159,6 +1167,17 @@ int zsdb_fetch(struct zsdb *db,
                                                  value, vallen, priv->dbcompare)) {
                         zslog(LOGDEBUG, "Record found at location %ld\n",
                               location);
+
+                        /* Packed files are searched newest first, so a
+                         * tombstone here hides older packed files */
+                        if (zs_record_read_key_from_file_offset(f,
+                                                                f->index->data[location],
+                                                                &temp_key) == ZS_OK &&
+                            (temp_key.base.type & REC_TYPE_DELETED)) {
+                                ret = ZS_NOTFOUND;
+                                goto done;
+                        }
+
                         ret = ZS_OK;
                         goto done;
                 }
@@ -1456,9 +1475,13 @@ int zsdb_repack(struct zsdb *db)
                 goto done;
         }
 
-        /* We prefer to pack finalised files first.
+        /* We prefer to pack finalised files first and at least 2 files are
+         * needed. Finalised file named <i>-<i>, so packing a single one would
+         * produce a packed file with the same name. The packing would overwrite
+         * its own input and then unlink it below, resulting in a loss of every
+         * record.
          */
-        if (!list_empty(&priv->dbfiles.fflist)) {
+        if (priv->dbfiles.ffcount > 1) {
                 struct zsdb_file *f;
                 /* There are finalised files, which need to be packed, we do
                    that first */

@@ -802,10 +802,196 @@ START_TEST(test_fetchnext_simple)
 }
 END_TEST
 
+/*
+ * Helpers for tests that move records across the active, finalised and
+ * packed tiers.
+ */
+static void tier_add(const char *key, const char *val)
+{
+        struct zsdb_txn *txn = NULL;
+        int ret;
+
+        ck_assert_int_eq(zsdb_write_lock_acquire(db, 0), ZS_OK);
+        ret = zsdb_add(db, (const unsigned char *)key, strlen(key),
+                       (const unsigned char *)val, strlen(val), &txn);
+        ck_assert_int_eq(ret, ZS_OK);
+        ck_assert_int_eq(zsdb_commit(db, &txn), ZS_OK);
+        ck_assert_int_eq(zsdb_write_lock_release(db), ZS_OK);
+}
+
+static void tier_remove(const char *key)
+{
+        struct zsdb_txn *txn = NULL;
+        int ret;
+
+        ck_assert_int_eq(zsdb_write_lock_acquire(db, 0), ZS_OK);
+        ret = zsdb_remove(db, (const unsigned char *)key, strlen(key), &txn);
+        ck_assert_int_eq(ret, ZS_OK);
+        ck_assert_int_eq(zsdb_commit(db, &txn), ZS_OK);
+        ck_assert_int_eq(zsdb_write_lock_release(db), ZS_OK);
+}
+
+static void tier_finalise(void)
+{
+        ck_assert_int_eq(zsdb_write_lock_acquire(db, 0), ZS_OK);
+        ck_assert_int_eq(zsdb_finalise(db), ZS_OK);
+        ck_assert_int_eq(zsdb_write_lock_release(db), ZS_OK);
+}
+
+static void tier_reopen(void);
+
+/* Reopen before packing, like in the real world, a separate process would. An
+ * in-process zsdb_finalise() doesn't add the new file to the list of
+ * finalised files, so repack wouldn't see it otherwise.
+ */
+static void tier_repack(void)
+{
+        tier_reopen();
+        ck_assert_int_eq(zsdb_pack_lock_acquire(db, 0), ZS_OK);
+        ck_assert_int_eq(zsdb_repack(db), ZS_OK);
+        ck_assert_int_eq(zsdb_pack_lock_release(db), ZS_OK);
+}
+
+static void tier_reopen(void)
+{
+        ck_assert_int_eq(zsdb_close(db), ZS_OK);
+        zsdb_final(&db);
+        ck_assert_int_eq(zsdb_init(&db, NULL, NULL), ZS_OK);
+        ck_assert_int_eq(zsdb_open(db, basedir, MODE_RDWR), ZS_OK);
+}
+
+static void tier_assert_value(const char *key, const char *expected)
+{
+        const unsigned char *value = NULL;
+        size_t vallen = 0;
+        struct zsdb_txn *txn = NULL;
+        int ret;
+
+        ret = zsdb_fetch(db, (const unsigned char *)key, strlen(key),
+                         &value, &vallen, &txn);
+        ck_assert_int_eq(ret, ZS_OK);
+        ck_assert_uint_eq(vallen, strlen(expected));
+        ck_assert_mem_eq(value, expected, vallen);
+}
+
+static void tier_assert_missing(const char *key)
+{
+        const unsigned char *value = NULL;
+        size_t vallen = 0;
+        struct zsdb_txn *txn = NULL;
+        int ret;
+
+        ret = zsdb_fetch(db, (const unsigned char *)key, strlen(key),
+                         &value, &vallen, &txn);
+        ck_assert_int_eq(ret, ZS_NOTFOUND);
+}
+
+/* Repacking when there is exactly one finalised file used to generate a
+ * packed filename identical to that finalised file (`-0-0`), and then
+ * unlink it as a "packed input", losing all of its records.
+ */
+START_TEST(test_repack_single_finalised_keeps_data)
+{
+        tier_add("alpha", "one");
+        tier_add("beta", "two");
+        tier_finalise();
+
+        tier_repack();
+
+        tier_assert_value("alpha", "one");
+        tier_assert_value("beta", "two");
+
+        tier_reopen();
+        tier_assert_value("alpha", "one");
+        tier_assert_value("beta", "two");
+}
+END_TEST
+
+/* Repacking two finalised files must produce a packed file with the
+ * records from both.
+ */
+START_TEST(test_repack_finalised_files_keeps_data)
+{
+        tier_add("alpha", "one");
+        tier_finalise();
+        tier_add("beta", "two");
+        tier_finalise();
+
+        tier_repack();
+        tier_reopen();
+
+        tier_assert_value("alpha", "one");
+        tier_assert_value("beta", "two");
+}
+END_TEST
+
+/* A key deleted in the active file must not be resurrected from a
+ * finalised file.
+ */
+START_TEST(test_delete_shadows_finalised)
+{
+        tier_add("alpha", "one");
+        tier_add("beta", "two");
+        tier_finalise();
+
+        tier_remove("alpha");
+        tier_assert_missing("alpha");
+        tier_assert_value("beta", "two");
+
+        tier_reopen();
+        tier_assert_missing("alpha");
+        tier_assert_value("beta", "two");
+
+        /* The tombstone itself is now in a finalised file */
+        tier_finalise();
+        tier_reopen();
+        tier_assert_missing("alpha");
+        tier_assert_value("beta", "two");
+}
+END_TEST
+
+/* A key deleted after its value was packed must stay deleted, whether
+ * the tombstone lives in the active, a finalised or a newer packed file.
+ */
+START_TEST(test_delete_shadows_packed)
+{
+        /* Put alpha and beta into a packed file (0-1) */
+        tier_add("alpha", "one");
+        tier_finalise();
+        tier_add("beta", "two");
+        tier_finalise();
+        tier_repack();
+        tier_reopen();
+        tier_assert_value("alpha", "one");
+
+        /* Tombstone in the active file */
+        tier_remove("alpha");
+        tier_assert_missing("alpha");
+        tier_reopen();
+        tier_assert_missing("alpha");
+        tier_assert_value("beta", "two");
+
+        /* Tombstone in a finalised file */
+        tier_finalise();
+        tier_reopen();
+        tier_assert_missing("alpha");
+
+        /* Tombstone in a newer packed file */
+        tier_add("gamma", "three");
+        tier_finalise();
+        tier_repack();
+        tier_reopen();
+        tier_assert_missing("alpha");
+        tier_assert_value("beta", "two");
+        tier_assert_value("gamma", "three");
+}
+END_TEST
+
 Suite *zsdb_suite(void)
 {
         Suite *s;
         TCase *tc_core;
+        TCase *tc_tiers;
         TCase *tc_many;
         TCase *tc_foreach;
         TCase *tc_fetch;
@@ -820,6 +1006,16 @@ Suite *zsdb_suite(void)
         tcase_add_test(tc_core, test_delete);
         tcase_add_test(tc_core, test_multiopen);
         suite_add_tcase(s, tc_core);
+
+        /* records moving across active/finalised/packed files */
+        tc_tiers = tcase_create("tiers");
+        tcase_add_checked_fixture(tc_tiers, setup, teardown);
+
+        tcase_add_test(tc_tiers, test_repack_single_finalised_keeps_data);
+        tcase_add_test(tc_tiers, test_repack_finalised_files_keeps_data);
+        tcase_add_test(tc_tiers, test_delete_shadows_finalised);
+        tcase_add_test(tc_tiers, test_delete_shadows_packed);
+        suite_add_tcase(s, tc_tiers);
 
         /* foreach */
         tc_foreach = tcase_create("foreach");
