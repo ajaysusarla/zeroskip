@@ -102,7 +102,7 @@ int zs_active_file_close(struct zsdb_priv *priv)
         return ret;
 }
 
-int zs_active_file_finalise(struct zsdb_priv *priv)
+int zs_active_file_finalise(struct zsdb_priv *priv, cstring *fname)
 {
         int ret = ZS_OK;
         cstring newfname = CSTRING_INIT;
@@ -119,9 +119,15 @@ int zs_active_file_finalise(struct zsdb_priv *priv)
                 goto done;
         }
 
-        ret = zs_active_file_write_commit_record(priv);
-        if (ret != ZS_OK)
-                goto done;
+        /* Commit anything uncommitted. With nothing pending, a commit
+         * record would carry a stale CRC and fail to verify. */
+        if (priv->dbfiles.factive.dirty ||
+            priv->dbfiles.factive.mf->crc32_data_len) {
+                ret = zs_active_file_write_commit_record(priv);
+                if (ret != ZS_OK)
+                        goto done;
+                priv->dbfiles.factive.dirty = 0;
+        }
 
         mfile_flush(&priv->dbfiles.factive.mf);
         mfile_close(&priv->dbfiles.factive.mf);
@@ -137,6 +143,8 @@ int zs_active_file_finalise(struct zsdb_priv *priv)
                 perror("Rename");
                 goto done;
         }
+        if (fname)
+                cstring_dup(&newfname, fname);
         cstring_release(&newfname);
 
         priv->dbfiles.factive.is_open = 0;

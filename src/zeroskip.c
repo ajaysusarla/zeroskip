@@ -422,6 +422,66 @@ static void zs_find_index_range_for_files(struct list_head *flist,
         }
 }
 
+static void zs_set_packed_file_priorities(struct zsdb_priv *priv)
+{
+        struct list_head *pos;
+        uint64_t priority = 0;
+
+        list_for_each_reverse(pos, &priv->dbfiles.pflist) {
+                struct zsdb_file *f;
+                f = list_entry(pos, struct zsdb_file, list);
+                f->priority = ++priority;
+        }
+}
+
+static int zs_track_finalised_file(struct zsdb_priv *priv, const char *path)
+{
+        struct zsdb_file *f = NULL;
+        int ret;
+
+        ret = zs_finalised_file_open(path, &f);
+        if (ret != ZS_OK) {
+                zslog(LOGWARNING, "Could not open finalised file %s\n", path);
+                return ret;
+        }
+
+        /* It's the newest finalised file */
+        list_add_head(&f->list, &priv->dbfiles.fflist);
+        priv->dbfiles.ffcount++;
+        f->priority = priv->dbfiles.ffcount;
+
+        ret = zs_finalised_file_record_foreach(f, load_memtree_record_cb,
+                                               load_deleted_memtree_record_cb,
+                                               priv->fmemtree);
+        if (ret != ZS_OK)
+                return ret;
+
+        memtree_free(priv->memtree);
+        priv->memtree = memtree_new(NULL, priv->btcompare);
+        priv->dbdirty = 1;
+
+        return ZS_OK;
+}
+
+static int zs_track_packed_file(struct zsdb_priv *priv, const char *path)
+{
+        struct zsdb_file *f = NULL;
+        int ret;
+
+        ret = zs_packed_file_open(path, &f);
+        if (ret != ZS_OK) {
+                zslog(LOGWARNING, "Could not open packed file %s\n", path);
+                return ret;
+        }
+
+        /* It covers the newest range of the files it was packed from */
+        list_add_head(&f->list, &priv->dbfiles.pflist);
+        priv->dbfiles.pfcount++;
+        zs_set_packed_file_priorities(priv);
+
+        return ZS_OK;
+}
+
 static int zsdb_reload(struct zsdb_priv *priv)
 {
         int ret = ZS_OK;
@@ -516,13 +576,14 @@ static int zsdb_reload(struct zsdb_priv *priv)
 
 
         /* Set priority of packed files(newest first), the newest file must have
-         * the highest priority.*
+         * the highest priority.*/
         priority = 0;
         list_for_each_reverse(pos, &priv->dbfiles.pflist) {
                 struct zsdb_file *f;
                 f = list_entry(pos, struct zsdb_file, list);
                 f->priority = ++priority;
         }
+        zs_set_packed_file_priorities(priv);
 
         /* Seek to the end of the file, that's where the
            records need to appended to.
@@ -784,6 +845,7 @@ int zsdb_open(struct zsdb *db, const char *dbdir, int mode)
                         f = list_entry(pos, struct zsdb_file, list);
                         f->priority = ++priority;
                 }
+                zs_set_packed_file_priorities(priv);
 
                 /* Seek to the end of the file, that's where the
                    records need to appended to.
@@ -914,11 +976,21 @@ int zsdb_add(struct zsdb *db,
         if (mfsize >= TWOMB) {
                 zslog(LOGDEBUG, "File %s is > 2MB, finalising.\n",
                         priv->dbfiles.factive.fname.buf);
-                ret = zs_active_file_finalise(priv);
-                if (ret != ZS_OK) goto done;
+                cstring ffname = CSTRING_INIT;
+
+                ret = zs_active_file_finalise(priv, &ffname);
+                if (ret != ZS_OK) {
+                        cstring_release(&ffname);
+                        goto done;
+                }
 
                 ret = zs_active_file_new(priv,
                                          priv->dotzsdb.curidx + 1);
+                if (ret == ZS_OK)
+                        ret = zs_track_finalised_file(priv, ffname.buf);
+                cstring_release(&ffname);
+                if (ret != ZS_OK) goto done;
+
                 zslog(LOGDEBUG, "New active log file %s created.\n",
                         priv->dbfiles.factive.fname.buf);
         }
@@ -1513,7 +1585,7 @@ int zsdb_repack(struct zsdb *db)
 
                 zs_packed_file_close(&f);
 
-                priv->dbfiles.pfcount++;
+                ret = zs_track_packed_file(priv, fname.buf);
 
                 /* Close finalised files and unlink them */
                 list_for_each_forward_safe(pos, p, &priv->dbfiles.fflist) {
@@ -1524,6 +1596,10 @@ int zsdb_repack(struct zsdb *db)
                         zs_finalised_file_close(&tempf);
                         priv->dbfiles.ffcount--;
                 }
+
+                /* Every finalised record is now in the packed file */
+                memtree_free(priv->fmemtree);
+                priv->fmemtree = memtree_new(NULL, priv->btcompare);
 
                 cstring_release(&fname);
 
@@ -1572,8 +1648,6 @@ int zsdb_repack(struct zsdb *db)
 
                 zs_packed_file_close(&newpfile);
 
-                priv->dbfiles.pfcount++;
-
                 list_for_each_forward_safe(pos, p, &filelist) {
                         struct zsdb_file *tempf;
                         list_del(pos);
@@ -1582,6 +1656,9 @@ int zsdb_repack(struct zsdb *db)
                         zs_packed_file_close(&tempf);
                         priv->dbfiles.pfcount--;
                 }
+
+                ret = zs_track_packed_file(priv, fname.buf);
+                cstring_release(&fname);
 
                 priv->dbdirty = 1;
 
@@ -1657,6 +1734,7 @@ int zsdb_finalise(struct zsdb *db)
 {
         int ret = ZS_OK;
         struct zsdb_priv *priv;
+        cstring ffname = CSTRING_INIT;
 
         assert(db);
         assert(db->priv);
@@ -1689,11 +1767,15 @@ int zsdb_finalise(struct zsdb *db)
 
         zslog(LOGDEBUG, "Finalising %s.\n",
               priv->dbfiles.factive.fname.buf);
-        ret = zs_active_file_finalise(priv);
+        ret = zs_active_file_finalise(priv, &ffname);
         if (ret != ZS_OK) goto done;
 
         ret = zs_active_file_new(priv,
                                  priv->dotzsdb.curidx + 1);
+        if (ret == ZS_OK)
+                ret = zs_track_finalised_file(priv, ffname.buf);
+        if (ret != ZS_OK) goto done;
+
         zslog(LOGDEBUG, "New active log file %s created.\n",
               priv->dbfiles.factive.fname.buf);
 
@@ -1704,6 +1786,7 @@ int zsdb_finalise(struct zsdb *db)
                 crc32_begin(&priv->dbfiles.factive.mf);
 
 done:
+        cstring_release(&ffname);
         return ret;
 }
 

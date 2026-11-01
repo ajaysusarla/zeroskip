@@ -13,6 +13,7 @@
 #include <libzeroskip/util.h>
 
 #include <assert.h>
+#include <dirent.h>
 #include <error.h>
 #include <errno.h>
 #include <stdio.h>
@@ -846,7 +847,6 @@ static void tier_reopen(void);
  */
 static void tier_repack(void)
 {
-        tier_reopen();
         ck_assert_int_eq(zsdb_pack_lock_acquire(db, 0), ZS_OK);
         ck_assert_int_eq(zsdb_repack(db), ZS_OK);
         ck_assert_int_eq(zsdb_pack_lock_release(db), ZS_OK);
@@ -885,6 +885,95 @@ static void tier_assert_missing(const char *key)
                          &value, &vallen, &txn);
         ck_assert_int_eq(ret, ZS_NOTFOUND);
 }
+
+static void tier_assert_keys(const char *prefix, const char *expected);
+
+/* Count the finalised (`-i-i`) and packed (`-i-j`) files in the DB.
+ */
+static void tier_count_files(int *finalised, int *packed)
+{
+        DIR *dir;
+        struct dirent *de;
+
+        *finalised = *packed = 0;
+
+        dir = opendir(basedir);
+        ck_assert_ptr_ne(dir, NULL);
+
+        while ((de = readdir(dir))) {
+                const char *p;
+                unsigned int sidx, eidx;
+
+                if (strncmp(de->d_name, "zeroskip-", 9) != 0)
+                        continue;
+
+                /* skip "zeroskip-" and the 36 character uuid */
+                p = de->d_name + 9 + 36;
+                if (sscanf(p, "-%u-%u", &sidx, &eidx) != 2)
+                        continue;
+
+                if (sidx == eidx)
+                        (*finalised)++;
+                else
+                        (*packed)++;
+        }
+
+        closedir(dir);
+}
+
+/* zsdb_finalise() used not to track the file it created, so a repack in
+ * the same process saw nothing to pack, and repack didn't track the
+ * packed file it wrote either.
+ */
+START_TEST(test_finalise_and_repack_in_process)
+{
+        int nfinalised, npacked;
+
+        tier_add("a", "1");
+        tier_finalise();
+        tier_add("b", "2");
+        tier_finalise();
+
+        tier_count_files(&nfinalised, &npacked);
+        ck_assert_int_eq(nfinalised, 2);
+        ck_assert_int_eq(npacked, 0);
+        tier_assert_keys(NULL, "a,b,");
+
+        tier_repack();
+
+        tier_count_files(&nfinalised, &npacked);
+        ck_assert_int_eq(nfinalised, 0);
+        ck_assert_int_eq(npacked, 1);
+        tier_assert_value("a", "1");
+        tier_assert_value("b", "2");
+        tier_assert_keys(NULL, "a,b,");
+
+        /* A second packed file, then merge the two */
+        tier_add("c", "3");
+        tier_finalise();
+        tier_add("a", "updated");
+        tier_finalise();
+        tier_repack();
+
+        tier_count_files(&nfinalised, &npacked);
+        ck_assert_int_eq(nfinalised, 0);
+        ck_assert_int_eq(npacked, 2);
+
+        tier_repack();
+
+        tier_count_files(&nfinalised, &npacked);
+        ck_assert_int_eq(nfinalised, 0);
+        ck_assert_int_eq(npacked, 1);
+        tier_assert_value("a", "updated");
+        tier_assert_keys(NULL, "a,b,c,");
+
+        tier_reopen();
+        tier_assert_value("a", "updated");
+        tier_assert_value("b", "2");
+        tier_assert_value("c", "3");
+        tier_assert_keys(NULL, "a,b,c,");
+}
+END_TEST
 
 /* Repacking when there is exactly one finalised file used to generate a
  * packed filename identical to that finalised file (`-0-0`), and then
@@ -1227,6 +1316,7 @@ Suite *zsdb_suite(void)
         tcase_add_test(tc_tiers, test_foreach_skips_deleted);
         tcase_add_test(tc_tiers, test_packed_keys_after_tombstone);
         tcase_add_test(tc_tiers, test_packed_merge_keeps_tombstones);
+        tcase_add_test(tc_tiers, test_finalise_and_repack_in_process);
         suite_add_tcase(s, tc_tiers);
 
         /* foreach */

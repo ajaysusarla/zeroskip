@@ -302,7 +302,7 @@ extern int zsdb_break(int err);
 /* zeroskip-active.c */
 extern int zs_active_file_open(struct zsdb_priv *priv, uint32_t idx, int mode);
 extern int zs_active_file_close(struct zsdb_priv *priv);
-extern int zs_active_file_finalise(struct zsdb_priv *priv);
+extern int zs_active_file_finalise(struct zsdb_priv *priv, cstring *fname);
 extern int zs_active_file_write_keyval_record(struct zsdb_priv *priv,
                                               const unsigned char *key,
                                               uint64_t keylen,
