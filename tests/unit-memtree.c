@@ -210,6 +210,73 @@ START_TEST(test_memtree_iter)
 }
 END_TEST                        /* test_memtree_iter */
 
+START_TEST(test_memtree_find_missing_key)
+{
+        int i, ret;
+        memtree_iter_t iter;
+
+        /* A key past the end of a leaf whose last record was removed,
+         * the freed record's pointer is still in the slot after the
+         * last record. */
+        {
+                struct record *rec;
+
+                rec = record_new((const unsigned char *)"k00", 3,
+                                 (const unsigned char *)"v", 1, 0);
+                ck_assert_int_eq(memtree_insert(tree, rec), MEMTREE_OK);
+                rec = record_new((const unsigned char *)"k98", 3,
+                                 (const unsigned char *)"v", 1, 0);
+                ck_assert_int_eq(memtree_insert(tree, rec), MEMTREE_OK);
+                memset(iter, 0, sizeof(memtree_iter_t));
+                ck_assert_int_eq(memtree_find(tree,
+                                              (const unsigned char *)"k98", 3,
+                                              iter), 1);
+                ck_assert_int_eq(memtree_remove_at(iter), 1); /* frees it */
+
+                memset(iter, 0, sizeof(memtree_iter_t));
+                ret = memtree_find(tree, (const unsigned char *)"k99", 3,
+                                   iter);
+                ck_assert_int_eq(ret, 0);
+                ck_assert_ptr_eq(iter->record, NULL);
+        }
+
+        /* Enough even keys to split the tree into several levels */
+        for (i = 0; i < 100; i += 2) {
+                char key[16], val[16];
+                struct record *rec;
+
+                sprintf(key, "k%02d", i);
+                sprintf(val, "v%02d", i);
+
+                rec = record_new((const unsigned char *)key, strlen(key),
+                                 (const unsigned char *)val, strlen(val), 0);
+                ret = memtree_insert_opt(tree, rec, 1); /* k00 exists */
+                ck_assert_int_eq(ret, MEMTREE_OK);
+        }
+
+        /* Every odd key is missing, expect the next even key */
+        for (i = 1; i < 100; i += 2) {
+                char key[16], next[16];
+
+                sprintf(key, "k%02d", i);
+                sprintf(next, "k%02d", i + 1);
+
+                memset(iter, 0, sizeof(memtree_iter_t));
+                ret = memtree_find(tree, (const unsigned char *)key,
+                                   strlen(key), iter);
+                ck_assert_int_eq(ret, 0);
+
+                if (i == 99) {
+                        ck_assert_ptr_eq(iter->record, NULL);
+                } else {
+                        ck_assert_ptr_ne(iter->record, NULL);
+                        ck_assert_uint_eq(iter->record->keylen, 3);
+                        ck_assert_mem_eq(iter->record->key, next, 3);
+                }
+        }
+}
+END_TEST                        /* test_memtree_find_missing_key */
+
 Suite *memtree_suite(void)
 {
         Suite *s;
@@ -242,6 +309,7 @@ Suite *memtree_suite(void)
         tcase_add_checked_fixture(tc_iter, setup, teardown);
 
         tcase_add_test(tc_iter, test_memtree_iter);
+        tcase_add_test(tc_iter, test_memtree_find_missing_key);
 
         suite_add_tcase(s, tc_iter);
 
