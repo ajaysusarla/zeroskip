@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <check.h>
 
 #if CHECK_MINOR_VERSION < 11
@@ -903,8 +904,15 @@ static void tier_count_files(int *finalised, int *packed)
         while ((de = readdir(dir))) {
                 const char *p;
                 unsigned int sidx, eidx;
+                char path[PATH_MAX];
+                struct stat st;
 
                 if (strncmp(de->d_name, "zeroskip-", 9) != 0)
+                        continue;
+
+                /* Only regular files are DB files */
+                snprintf(path, sizeof(path), "%s/%s", basedir, de->d_name);
+                if (stat(path, &st) != 0 || !S_ISREG(st.st_mode))
                         continue;
 
                 /* skip "zeroskip-" and the 36 character uuid */
@@ -972,6 +980,110 @@ START_TEST(test_finalise_and_repack_in_process)
         tier_assert_value("b", "2");
         tier_assert_value("c", "3");
         tier_assert_keys(NULL, "a,b,c,");
+}
+END_TEST
+
+/* Get the path a packed file for `sidx`-`eidx` would have, using the
+ * uuid from any DB file in the directory.
+ */
+static void tier_packed_path(unsigned int sidx, unsigned int eidx,
+                             char *buf, size_t len)
+{
+        DIR *dir;
+        struct dirent *de;
+        char uuid[37] = { 0 };
+
+        dir = opendir(basedir);
+        ck_assert_ptr_ne(dir, NULL);
+        while ((de = readdir(dir))) {
+                if (strncmp(de->d_name, "zeroskip-", 9) == 0) {
+                        memcpy(uuid, de->d_name + 9, 36);
+                        break;
+                }
+        }
+        closedir(dir);
+        ck_assert_int_eq(strlen(uuid), 36);
+
+        snprintf(buf, len, "%s/zeroskip-%s-%u-%u", basedir, uuid, sidx, eidx);
+}
+
+static int tier_try_repack(void)
+{
+        int ret;
+
+        ck_assert_int_eq(zsdb_pack_lock_acquire(db, 0), ZS_OK);
+        ret = zsdb_repack(db);
+        ck_assert_int_eq(zsdb_pack_lock_release(db), ZS_OK);
+
+        return ret;
+}
+
+/* If packing fails, repack must leave the files it was packing, and
+ * the in-memory state, untouched. It used to ignore the error and
+ * unlink its inputs anyway.
+ *
+ * The pack is made to fail by putting a directory where the packed
+ * file has to go.
+ */
+START_TEST(test_repack_failure_keeps_inputs)
+{
+        char blocker[PATH_MAX];
+        int nfinalised, npacked;
+
+        /* Finalised files 0-0 and 1-1 pack into 0-1 */
+        tier_add("a", "1");
+        tier_finalise();
+        tier_add("b", "2");
+        tier_finalise();
+
+        tier_packed_path(0, 1, blocker, sizeof(blocker));
+        ck_assert_int_eq(mkdir(blocker, 0700), 0);
+
+        ck_assert_int_ne(tier_try_repack(), ZS_OK);
+
+        tier_count_files(&nfinalised, &npacked);
+        ck_assert_int_eq(nfinalised, 2);
+        ck_assert_int_eq(npacked, 0);
+        tier_assert_value("a", "1");
+        tier_assert_value("b", "2");
+        tier_assert_keys(NULL, "a,b,");
+
+        /* Once the blocker is gone, repack works */
+        ck_assert_int_eq(rmdir(blocker), 0);
+        tier_repack();
+        tier_count_files(&nfinalised, &npacked);
+        ck_assert_int_eq(nfinalised, 0);
+        ck_assert_int_eq(npacked, 1);
+
+        /* Packed files 0-1 and 2-3 merge into 0-3 */
+        tier_add("c", "3");
+        tier_finalise();
+        tier_add("d", "4");
+        tier_finalise();
+        tier_repack();
+
+        tier_packed_path(0, 3, blocker, sizeof(blocker));
+        ck_assert_int_eq(mkdir(blocker, 0700), 0);
+
+        ck_assert_int_ne(tier_try_repack(), ZS_OK);
+
+        tier_count_files(&nfinalised, &npacked);
+        ck_assert_int_eq(npacked, 2);
+        tier_assert_value("a", "1");
+        tier_assert_value("d", "4");
+        tier_assert_keys(NULL, "a,b,c,d,");
+
+        ck_assert_int_eq(rmdir(blocker), 0);
+
+        /* The in-memory state still matches the files: merge again */
+        tier_repack();
+        tier_count_files(&nfinalised, &npacked);
+        ck_assert_int_eq(npacked, 1);
+        tier_assert_keys(NULL, "a,b,c,d,");
+
+        tier_reopen();
+        tier_assert_keys(NULL, "a,b,c,d,");
+        tier_assert_value("c", "3");
 }
 END_TEST
 
@@ -1317,6 +1429,7 @@ Suite *zsdb_suite(void)
         tcase_add_test(tc_tiers, test_packed_keys_after_tombstone);
         tcase_add_test(tc_tiers, test_packed_merge_keeps_tombstones);
         tcase_add_test(tc_tiers, test_finalise_and_repack_in_process);
+        tcase_add_test(tc_tiers, test_repack_failure_keeps_inputs);
         suite_add_tcase(s, tc_tiers);
 
         /* foreach */

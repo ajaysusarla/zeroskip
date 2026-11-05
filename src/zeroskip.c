@@ -1503,6 +1503,68 @@ int zsdb_consistent(struct zsdb *db, struct zsdb_txn **txn _unused_)
         return ret;
 }
 
+/* Repack writes to a temporary file in the DB directory, which
+ * zsdb_open() ignores since it doesn't start with ZS_FNAME_PREFIX, and
+ * gives it its real name only once it is complete.
+ */
+#define ZS_REPACK_TMP_PREFIX ".repack-"
+
+static void zs_repack_tmp_filename(struct zsdb_priv *priv, cstring *fname,
+                                   cstring *tmpfname)
+{
+        /* fname is "<dbdir>/<name>" */
+        cstring_release(tmpfname);
+        cstring_dup(&priv->dbdir, tmpfname);
+        cstring_addch(tmpfname, '/');
+        cstring_addstr(tmpfname, ZS_REPACK_TMP_PREFIX);
+        cstring_addstr(tmpfname, fname->buf + priv->dbdir.len + 1);
+}
+
+/* Give a complete packed file its real name and start tracking it. On
+ * failure the temporary file is removed and nothing else is changed.
+ */
+static int zs_repack_install(struct zsdb_priv *priv, cstring *tmpfname,
+                             cstring *fname)
+{
+        int ret;
+
+        if (xrename(tmpfname->buf, fname->buf) != 0) {
+                zslog(LOGWARNING, "Failed renaming %s to %s: %s\n",
+                      tmpfname->buf, fname->buf, strerror(errno));
+                xunlink(tmpfname->buf);
+                return ZS_IOERROR;
+        }
+
+        ret = zs_track_packed_file(priv, fname->buf);
+        if (ret != ZS_OK) {
+                /* It's complete, but we can't read it back: don't let it
+                 * replace its inputs. */
+                xunlink(fname->buf);
+                return ret;
+        }
+
+        return ZS_OK;
+}
+
+/* Put packed files taken off the list for repacking back in place: the
+ * list is newest first, and `flist` holds them oldest first.
+ */
+static void zs_repack_restore_packed_files(struct zsdb_priv *priv,
+                                           struct list_head *flist)
+{
+        struct list_head *pos, *p;
+
+        list_for_each_forward_safe(pos, p, flist) {
+                struct zsdb_file *f;
+                list_del(pos);
+                f = list_entry(pos, struct zsdb_file, list);
+                f->indexpos = 0;
+                list_add_head(&f->list, &priv->dbfiles.pflist);
+        }
+
+        zs_set_packed_file_priorities(priv);
+}
+
 /*
  * zsdb_repack(): Repack a DB
  * When the DB is being packed, records can be still be written to the
@@ -1519,6 +1581,7 @@ int zsdb_repack(struct zsdb *db)
         struct zsdb_priv *priv;
         uint32_t startidx, endidx;
         cstring fname = CSTRING_INIT;
+        cstring tmpfname = CSTRING_INIT;
         struct list_head *pos, *p;
 
         assert(db);
@@ -1562,7 +1625,7 @@ int zsdb_repack(struct zsdb *db)
          * record.
          */
         if (priv->dbfiles.ffcount > 1) {
-                struct zsdb_file *f;
+                struct zsdb_file *f = NULL;
                 /* There are finalised files, which need to be packed, we do
                    that first */
 
@@ -1571,21 +1634,26 @@ int zsdb_repack(struct zsdb *db)
                                               &startidx, &endidx);
 
                 zs_filename_generate_packed(priv, &fname, startidx, endidx);
+                zs_repack_tmp_filename(priv, &fname, &tmpfname);
                 zslog(LOGDEBUG, "Packing into file %s...\n", fname.buf);
                 /* Pack the records from the in-memory tree*/
-                ret = zs_packed_file_new_from_memtree(fname.buf,
+                ret = zs_packed_file_new_from_memtree(tmpfname.buf,
                                                       startidx, endidx,
                                                       priv, &f);
                 if (ret != ZS_OK) {
-                        crc32_end(&f->mf);
-                        zslog(LOGDEBUG,
-                              "Internal error when packing finalised files\n");
-                        /* ERROR! */
+                        /* The writer has removed its partial output */
+                        zslog(LOGWARNING,
+                              "Failed packing finalised files into %s\n",
+                              fname.buf);
+                        ret = (ret > 0) ? ZS_IOERROR : ret;
+                        goto done;
                 }
 
                 zs_packed_file_close(&f);
 
-                ret = zs_track_packed_file(priv, fname.buf);
+                ret = zs_repack_install(priv, &tmpfname, &fname);
+                if (ret != ZS_OK)
+                        goto done;
 
                 /* Close finalised files and unlink them */
                 list_for_each_forward_safe(pos, p, &priv->dbfiles.fflist) {
@@ -1600,8 +1668,6 @@ int zsdb_repack(struct zsdb *db)
                 /* Every finalised record is now in the packed file */
                 memtree_free(priv->fmemtree);
                 priv->fmemtree = memtree_new(NULL, priv->btcompare);
-
-                cstring_release(&fname);
 
                 priv->dbdirty = 1;
 
@@ -1628,7 +1694,7 @@ int zsdb_repack(struct zsdb *db)
 
                         list_del(pos);
                         list_add_head(&tempf->list, &filelist);
-                        printf("\t > %s\n", tempf->fname.buf);
+                        zslog(LOGDEBUG, "\t > %s\n", tempf->fname.buf);
                         i++;
                 }
 
@@ -1637,16 +1703,34 @@ int zsdb_repack(struct zsdb *db)
                                               &startidx, &endidx);
 
                 zs_filename_generate_packed(priv, &fname, startidx, endidx);
+                zs_repack_tmp_filename(priv, &fname, &tmpfname);
                 zslog(LOGDEBUG, "Packing into file %s...\n", fname.buf);
 
                 ret = zs_iterator_new(db, &iter);
-                ret = zs_packed_file_new_from_packed_files(fname.buf,
-                                                           startidx, endidx,
-                                                           priv, &filelist,
-                                                           &iter, &newpfile);
+                if (ret == ZS_OK)
+                        ret = zs_packed_file_new_from_packed_files(tmpfname.buf,
+                                                                   startidx, endidx,
+                                                                   priv, &filelist,
+                                                                   &iter, &newpfile);
                 zs_iterator_end(&iter);
 
+                if (ret != ZS_OK) {
+                        /* The writer has removed its partial output */
+                        zslog(LOGWARNING,
+                              "Failed packing packed files into %s\n",
+                              fname.buf);
+                        ret = (ret > 0) ? ZS_IOERROR : ret;
+                        zs_repack_restore_packed_files(priv, &filelist);
+                        goto done;
+                }
+
                 zs_packed_file_close(&newpfile);
+
+                ret = zs_repack_install(priv, &tmpfname, &fname);
+                if (ret != ZS_OK) {
+                        zs_repack_restore_packed_files(priv, &filelist);
+                        goto done;
+                }
 
                 list_for_each_forward_safe(pos, p, &filelist) {
                         struct zsdb_file *tempf;
@@ -1656,9 +1740,7 @@ int zsdb_repack(struct zsdb *db)
                         zs_packed_file_close(&tempf);
                         priv->dbfiles.pfcount--;
                 }
-
-                ret = zs_track_packed_file(priv, fname.buf);
-                cstring_release(&fname);
+                zs_set_packed_file_priorities(priv);
 
                 priv->dbdirty = 1;
 
@@ -1668,6 +1750,9 @@ int zsdb_repack(struct zsdb *db)
 
         zslog(LOGDEBUG, "Nothing to be packed for now!\n");
 done:
+        cstring_release(&fname);
+        cstring_release(&tmpfname);
+
         if (!zs_dotzsdb_update_end(priv)) {
                 zslog(LOGDEBUG, "Failed release acquired lock for packing!\n");
                 ret = ZS_ERROR;
