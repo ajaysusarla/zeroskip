@@ -1248,7 +1248,78 @@ START_TEST(test_delete_long_key)
 }
 END_TEST
 
+/* zsdb_fetch() skips packed files whose key range can't hold the key.
+ * It used to take a long key's length from the short-length field (0),
+ * so when a packed file's last key was long, every lookup compared
+ * greater than it and the whole file was skipped.
+ */
+START_TEST(test_fetch_packed_long_keys)
+{
+        struct zsdb_txn *txn = NULL;
+        const unsigned char *value = NULL;
+        size_t vallen = 0;
+        unsigned char *lkey = make_long_key('L');
+        unsigned char *lkey2 = make_long_key('A');
+        int ret;
+
+        /* Packed file 0-1: lkey2 ('A'...) < lkey ('L'...) < "M",
+         * starting with a long key. */
+        tier_add("M", "short");
+        ck_assert_int_eq(zsdb_write_lock_acquire(db, 0), ZS_OK);
+        ret = zsdb_add(db, lkey, LONG_KEY_LEN,
+                       (const unsigned char *)"long", 4, &txn);
+        ck_assert_int_eq(ret, ZS_OK);
+        ck_assert_int_eq(zsdb_commit(db, &txn), ZS_OK);
+        ck_assert_int_eq(zsdb_write_lock_release(db), ZS_OK);
+        tier_finalise();
+
+        ck_assert_int_eq(zsdb_write_lock_acquire(db, 0), ZS_OK);
+        ret = zsdb_add(db, lkey2, LONG_KEY_LEN,
+                       (const unsigned char *)"first", 5, &txn);
+        ck_assert_int_eq(ret, ZS_OK);
+        ck_assert_int_eq(zsdb_commit(db, &txn), ZS_OK);
+        ck_assert_int_eq(zsdb_write_lock_release(db), ZS_OK);
+        tier_finalise();
+        tier_repack();
+
+        /* Packed file 2-3: "B" < lkey, ending with a long key */
+        tier_add("B", "bee");
+        tier_finalise();
+        ck_assert_int_eq(zsdb_write_lock_acquire(db, 0), ZS_OK);
+        ret = zsdb_add(db, lkey, LONG_KEY_LEN,
+                       (const unsigned char *)"newer", 5, &txn);
+        ck_assert_int_eq(ret, ZS_OK);
+        ck_assert_int_eq(zsdb_commit(db, &txn), ZS_OK);
+        ck_assert_int_eq(zsdb_write_lock_release(db), ZS_OK);
+        tier_finalise();
+        tier_repack();
+        tier_reopen();
+
+        /* Everything is in packed files now */
+        tier_assert_value("B", "bee");
+        tier_assert_value("M", "short");
+
+        ret = zsdb_fetch(db, lkey, LONG_KEY_LEN, &value, &vallen, &txn);
+        ck_assert_int_eq(ret, ZS_OK);
+        ck_assert_uint_eq(vallen, 5);
+        ck_assert_mem_eq(value, "newer", 5);
+
+        ret = zsdb_fetch(db, lkey2, LONG_KEY_LEN, &value, &vallen, &txn);
+        ck_assert_int_eq(ret, ZS_OK);
+        ck_assert_uint_eq(vallen, 5);
+        ck_assert_mem_eq(value, "first", 5);
+
+        /* Keys outside every file's range are still not found */
+        tier_assert_missing("0");
+        tier_assert_missing("zz");
+
+        free(lkey);
+        free(lkey2);
+}
+END_TEST
+
 /* Iteration helpers */
+
 static char iter_keys[256];
 
 static int collect_key_cb(void *data _unused_,
@@ -1425,6 +1496,7 @@ Suite *zsdb_suite(void)
         tcase_add_test(tc_tiers, test_delete_shadows_finalised);
         tcase_add_test(tc_tiers, test_delete_shadows_packed);
         tcase_add_test(tc_tiers, test_delete_long_key);
+        tcase_add_test(tc_tiers, test_fetch_packed_long_keys);
         tcase_add_test(tc_tiers, test_foreach_skips_deleted);
         tcase_add_test(tc_tiers, test_packed_keys_after_tombstone);
         tcase_add_test(tc_tiers, test_packed_merge_keeps_tombstones);

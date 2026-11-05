@@ -1110,6 +1110,26 @@ done:
         return ret;
 }
 
+static int zs_packed_file_cmp_key_at(struct zsdb_priv *priv,
+                                     struct zsdb_file *f, uint64_t idx,
+                                     const unsigned char *key, size_t keylen)
+{
+        struct zs_key k;
+        uint64_t klen;
+
+        if (zs_record_read_key_from_file_offset(f, f->index->data[idx],
+                                                &k) != ZS_OK)
+                return 0;
+
+        /* Long keys keep their length in llen, short keys in slen */
+        klen = (k.base.type & REC_TYPE_LONG) ? k.base.llen : k.base.slen;
+
+        if (priv->dbcompare)
+                return priv->dbcompare(key, keylen, k.data, klen);
+
+        return memcmp_raw(key, keylen, k.data, klen);
+}
+
 int zsdb_fetch(struct zsdb *db,
                const unsigned char *key,
                size_t keylen,
@@ -1201,38 +1221,15 @@ int zsdb_fetch(struct zsdb *db,
                  */
                 zslog(LOGDEBUG, "\tfirst record at offset: %d\n",
                       f->index->data[0]);
-                zs_record_read_key_from_file_offset(f, f->index->data[0],
-                                                    &temp_key);
-                if (priv->dbcompare) {
-                        cmp_ret = priv->dbcompare(key, keylen, temp_key.data,
-                                                  (temp_key.base.type == REC_TYPE_KEY ||
-                                                   temp_key.base.type == REC_TYPE_DELETED) ?
-                                                  temp_key.base.slen : temp_key.base.slen);
-                } else {
-                        cmp_ret = memcmp_raw(key, keylen, temp_key.data,
-                                             (temp_key.base.type == REC_TYPE_KEY ||
-                                              temp_key.base.type == REC_TYPE_DELETED) ?
-                                             temp_key.base.slen : temp_key.base.slen);
-                }
+                cmp_ret = zs_packed_file_cmp_key_at(priv, f, 0, key, keylen);
                 if (cmp_ret < 0)
                         continue;
 
                 zslog(LOGDEBUG, "\tlast record at offset: %d\n",
                       f->index->data[f->index->count - 1]);
-                zs_record_read_key_from_file_offset(f,
-                                                    f->index->data[f->index->count - 1],
-                                                    &temp_key);
-                if (priv->dbcompare) {
-                        cmp_ret = priv->dbcompare(key, keylen, temp_key.data,
-                                                  (temp_key.base.type == REC_TYPE_KEY ||
-                                                   temp_key.base.type == REC_TYPE_DELETED) ?
-                                                  temp_key.base.slen : temp_key.base.slen);
-                } else {
-                        cmp_ret = memcmp_raw(key, keylen, temp_key.data,
-                                             (temp_key.base.type == REC_TYPE_KEY ||
-                                              temp_key.base.type == REC_TYPE_DELETED) ?
-                                             temp_key.base.slen : temp_key.base.slen);
-                }
+                cmp_ret = zs_packed_file_cmp_key_at(priv, f,
+                                                    f->index->count - 1,
+                                                    key, keylen);
                 if (cmp_ret > 0)
                         continue;
 
